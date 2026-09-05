@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 const { randomUUID } = require('crypto');
 
 const app = express();
+app.set('trust proxy', 1);
 const port = Number(process.env.PORT || 3000);
 const recordingsDir = path.join(__dirname, 'recordings');
 const viewsDir = path.join(__dirname, 'views');
@@ -76,25 +77,31 @@ function startRecording(schedule) {
   const outputPath = path.join(recordingsDir, fileName);
 
   schedule.status = 'recording';
+  console.log(`[recording] Déclenchement de l'enregistrement ${schedule.id} pour ${schedule.url}`);
 
   const args = [schedule.url, schedule.quality, '-o', outputPath];
+  console.log(`[recording] Lancement de Streamlink pour ${schedule.id}, sortie: ${fileName}`);
   const child = spawn('streamlink', args, { stdio: 'ignore' });
   schedule.process = child;
 
-  child.on('error', () => {
+  child.on('error', (error) => {
+    console.error(`[recording] Échec du lancement de ${schedule.id}: ${error.message}`);
     schedule.status = 'failed';
     schedule.process = null;
   });
 
   child.on('close', (code) => {
     schedule.process = null;
+    console.log(`[recording] Streamlink terminé pour ${schedule.id} avec le code ${code}`);
     if (schedule.status === 'stopped') {
       schedule.status = 'completed';
+      console.log(`[recording] Enregistrement ${schedule.id} terminé après un arrêt demandé`);
       return;
     }
 
     if (schedule.continuous && !schedule.endAt) {
       schedule.status = 'waiting-next-live';
+      console.log(`[recording] ${schedule.id} attend le prochain live, redémarrage dans ${restartDelayMs} ms`);
       schedule.restartTimer = setTimeout(() => {
         startRecording(schedule);
       }, restartDelayMs);
@@ -102,6 +109,7 @@ function startRecording(schedule) {
     }
 
     schedule.status = code === 0 ? 'completed' : 'failed';
+    console.log(`[recording] Statut final de ${schedule.id}: ${schedule.status}`);
   });
 
   if (schedule.endAt) {
@@ -110,6 +118,7 @@ function startRecording(schedule) {
       schedule.stopTimer = setTimeout(() => {
         if (schedule.process) {
           schedule.status = 'stopped';
+          console.log(`[recording] Arrêt demandé pour ${schedule.id} à la date de fin prévue`);
           schedule.process.kill('SIGTERM');
         }
       }, delay);
@@ -119,12 +128,15 @@ function startRecording(schedule) {
 
 function queueSchedule(schedule) {
   if (!schedule.startAt || schedule.startAt.getTime() <= Date.now()) {
+    console.log(`[recording] Démarrage immédiat demandé pour ${schedule.id}`);
     startRecording(schedule);
     return;
   }
 
   schedule.status = 'scheduled';
+  console.log(`[recording] Enregistrement ${schedule.id} planifié pour ${formatDate(schedule.startAt)}`);
   schedule.startTimer = setTimeout(() => {
+    console.log(`[recording] Heure de déclenchement atteinte pour ${schedule.id}`);
     startRecording(schedule);
   }, schedule.startAt.getTime() - Date.now());
 }
