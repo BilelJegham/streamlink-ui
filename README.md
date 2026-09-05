@@ -8,7 +8,7 @@ Application web Node.js pour planifier des enregistrements Twitch avec Streamlin
   - URL du stream
   - qualité (`best`, `720p`, etc.)
   - plage horaire optionnelle (`début` / `fin`)
-- Si aucune plage horaire n'est fournie, l'enregistrement démarre dès que le live est actif (`streamlink --retry-streams 30`).
+- Si aucune plage horaire n'est fournie, l'application surveille en continu et relance automatiquement l'enregistrement pour capter tous les lives du stream.
 - Liste des programmations d'enregistrement sur la page principale.
 - Deuxième page pour lister les fichiers d'enregistrement générés.
 - UI simple avec **HTMX** + **PicoCSS**.

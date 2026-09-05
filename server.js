@@ -10,6 +10,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const recordingsDir = path.join(__dirname, 'recordings');
 const schedules = [];
+const restartDelayMs = 5000;
 
 fs.mkdirSync(recordingsDir, { recursive: true });
 
@@ -106,9 +107,7 @@ function startRecording(schedule) {
     schedule.url,
     schedule.quality,
     '-o',
-    outputPath,
-    '--retry-streams',
-    '30'
+    outputPath
   ];
 
   const child = spawn('streamlink', args, { stdio: 'ignore' });
@@ -125,6 +124,15 @@ function startRecording(schedule) {
       schedule.status = 'completed';
       return;
     }
+
+    if (schedule.continuous && !schedule.endAt) {
+      schedule.status = 'waiting-next-live';
+      schedule.restartTimer = setTimeout(() => {
+        startRecording(schedule);
+      }, restartDelayMs);
+      return;
+    }
+
     schedule.status = code === 0 ? 'completed' : 'failed';
   });
 
@@ -229,9 +237,11 @@ app.post('/schedules', (req, res) => {
     quality,
     startAt,
     endAt,
+    continuous: !startAt && !endAt,
     status: 'pending',
     startTimer: null,
     stopTimer: null,
+    restartTimer: null,
     process: null
   };
 
