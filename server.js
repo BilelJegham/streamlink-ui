@@ -55,6 +55,11 @@ const updateStatusStmt = db.prepare(`
   WHERE id = ?
 `);
 
+const deleteScheduleStmt = db.prepare(`
+  DELETE FROM schedules
+  WHERE id = ?
+`);
+
 const selectSchedulesStmt = db.prepare(`
   SELECT id, url, quality, start_at, end_at, continuous, status, created_at, updated_at
   FROM schedules
@@ -74,7 +79,8 @@ const schedules = selectSchedulesStmt.all().map((row) => ({
   startTimer: null,
   stopTimer: null,
   restartTimer: null,
-  process: null
+  process: null,
+  deleted: false
 }));
 
 app.use(express.urlencoded({ extended: false }));
@@ -94,6 +100,20 @@ function formatDate(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleString();
+}
+
+function getStreamName(url) {
+  try {
+    const pathname = new URL(url).pathname.replace(/\/+$/, '');
+    const streamName = pathname.split('/').pop();
+    return streamName || 'stream';
+  } catch {
+    return 'stream';
+  }
+}
+
+function sanitizeFileNamePart(value) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^[-_.]+|[-_.]+$/g, '') || 'stream';
 }
 
 function renderLayout(title, content) {
@@ -116,8 +136,16 @@ function renderSchedulesSection(message, isError) {
         <td>${formatDate(schedule.startAt)}</td>
         <td>${formatDate(schedule.endAt)}</td>
         <td>${escapeHtml(schedule.status)}</td>
+        <td>
+          <form method="post" action="/schedules/${escapeHtml(schedule.id)}/stop" hx-post="/schedules/${escapeHtml(schedule.id)}/stop" hx-target="#schedules-section" hx-swap="outerHTML" style="display: inline-block;">
+            <button type="submit" ${schedule.status === 'stopped' || schedule.status === 'completed' ? 'disabled' : ''}>Arrêter</button>
+          </form>
+          <form method="post" action="/schedules/${escapeHtml(schedule.id)}/delete" hx-post="/schedules/${escapeHtml(schedule.id)}/delete" hx-target="#schedules-section" hx-swap="outerHTML" style="display: inline-block;">
+            <button type="submit" class="secondary" onclick="return confirm('Supprimer cette programmation ?');">Supprimer</button>
+          </form>
+        </td>
       </tr>`)
-    .join('') || '<tr><td colspan="6">Aucune programmation pour le moment.</td></tr>';
+    .join('') || '<tr><td colspan="7">Aucune programmation pour le moment.</td></tr>';
 
   return fillTemplate(templates.schedulesSection, {
     notice,
@@ -173,7 +201,9 @@ function startRecording(schedule) {
   clearScheduleTimers(schedule);
 
   const now = new Date();
-  const fileName = `${schedule.id}-${now.toISOString().replaceAll(':', '-')}.mp4`;
+  const streamName = sanitizeFileNamePart(getStreamName(schedule.url));
+  const timestamp = now.toISOString().replace('T', '_').replaceAll(':', '-');
+  const fileName = `${streamName}-${timestamp}.mp4`;
   const outputPath = path.join(recordingsDir, fileName);
 
   setScheduleStatus(schedule, 'recording');
@@ -191,6 +221,10 @@ function startRecording(schedule) {
   });
 
   child.on('error', (error) => {
+    if (schedule.deleted || schedule.status === 'stopped') {
+      return;
+    }
+
     console.error(`[recording] Erreur lancement ${schedule.id}: ${error.message}`);
     schedule.process = null;
 
@@ -208,10 +242,14 @@ function startRecording(schedule) {
 
   child.on('close', (code) => {
     schedule.process = null;
+
+    if (schedule.deleted) {
+      return;
+    }
+
     console.log(`[recording] Fin ${schedule.id} code=${code}`);
 
     if (schedule.status === 'stopped') {
-      setScheduleStatus(schedule, 'completed');
       return;
     }
 
@@ -233,7 +271,7 @@ function startRecording(schedule) {
       schedule.stopTimer = setTimeout(() => {
         schedule.stopTimer = null;
         if (schedule.process) {
-          setScheduleStatus(schedule, 'stopped');
+          setScheduleStatus(schedule, 'completed');
           schedule.process.kill('SIGTERM');
         }
       }, delay);
@@ -278,7 +316,7 @@ function schedulerTick() {
       continue;
     }
 
-    if (schedule.status === 'completed') {
+    if (schedule.status === 'completed' || schedule.status === 'stopped') {
       continue;
     }
 
@@ -287,6 +325,15 @@ function schedulerTick() {
     }
 
     queueSchedule(schedule);
+  }
+}
+
+function stopSchedule(schedule) {
+  clearScheduleTimers(schedule);
+  setScheduleStatus(schedule, 'stopped');
+
+  if (schedule.process) {
+    schedule.process.kill('SIGTERM');
   }
 }
 
@@ -352,7 +399,8 @@ app.post('/schedules', (req, res) => {
     startTimer: null,
     stopTimer: null,
     restartTimer: null,
-    process: null
+    process: null,
+    deleted: false
   };
 
   insertScheduleStmt.run(
@@ -371,6 +419,39 @@ app.post('/schedules', (req, res) => {
   queueSchedule(schedule);
 
   const html = renderSchedulesSection('Programmation ajoutée.');
+  return htmxRequest ? res.type('html').send(html) : res.redirect('/');
+});
+
+app.post('/schedules/:id/stop', (req, res) => {
+  const schedule = schedules.find((item) => item.id === req.params.id);
+  const htmxRequest = req.get('HX-Request') === 'true';
+
+  if (!schedule) {
+    return res.status(404).send('Programmation introuvable.');
+  }
+
+  stopSchedule(schedule);
+  const html = renderSchedulesSection('Programmation arrêtée.');
+  return htmxRequest ? res.type('html').send(html) : res.redirect('/');
+});
+
+app.post('/schedules/:id/delete', (req, res) => {
+  const scheduleIndex = schedules.findIndex((item) => item.id === req.params.id);
+  const htmxRequest = req.get('HX-Request') === 'true';
+
+  if (scheduleIndex === -1) {
+    return res.status(404).send('Programmation introuvable.');
+  }
+
+  const [schedule] = schedules.splice(scheduleIndex, 1);
+  schedule.deleted = true;
+  clearScheduleTimers(schedule);
+  if (schedule.process) {
+    schedule.process.kill('SIGTERM');
+  }
+  deleteScheduleStmt.run(schedule.id);
+
+  const html = renderSchedulesSection('Programmation supprimée.');
   return htmxRequest ? res.type('html').send(html) : res.redirect('/');
 });
 
