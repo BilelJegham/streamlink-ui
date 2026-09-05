@@ -16,6 +16,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^5.2.1"
+    "escape-html": "^1.0.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0"
   }
 }

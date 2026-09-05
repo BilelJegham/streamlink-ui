@@ -1,4 +1,6 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const escapeHtml = require('escape-html');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -12,15 +14,12 @@ const schedules = [];
 fs.mkdirSync(recordingsDir, { recursive: true });
 
 app.use(express.urlencoded({ extended: false }));
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120
+  })
+);
 
 function formatDate(value) {
   if (!value) return '-';
