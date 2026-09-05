@@ -137,10 +137,7 @@ function renderSchedulesSection(message, isError) {
         <td>${formatDate(schedule.endAt)}</td>
         <td>${escapeHtml(schedule.status)}</td>
         <td>
-          <form method="post" action="/schedules/${escapeHtml(schedule.id)}/stop" hx-post="/schedules/${escapeHtml(schedule.id)}/stop" hx-target="#schedules-section" hx-swap="outerHTML" style="display: inline-block;">
-            <button type="submit" ${schedule.status === 'stopped' || schedule.status === 'completed' ? 'disabled' : ''}>Arrêter</button>
-          </form>
-          <form method="post" action="/schedules/${escapeHtml(schedule.id)}/delete" hx-post="/schedules/${escapeHtml(schedule.id)}/delete" hx-target="#schedules-section" hx-swap="outerHTML" style="display: inline-block;">
+          <form method="post" action="/schedules/${escapeHtml(schedule.id)}/delete" hx-post="/schedules/${escapeHtml(schedule.id)}/delete" hx-target="#schedules-section" hx-swap="outerHTML">
             <button type="submit" class="secondary" onclick="return confirm('Supprimer cette programmation ?');">Supprimer</button>
           </form>
         </td>
@@ -328,15 +325,6 @@ function schedulerTick() {
   }
 }
 
-function stopSchedule(schedule) {
-  clearScheduleTimers(schedule);
-  setScheduleStatus(schedule, 'stopped');
-
-  if (schedule.process) {
-    schedule.process.kill('SIGTERM');
-  }
-}
-
 function parseDateTime(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -419,19 +407,6 @@ app.post('/schedules', (req, res) => {
   queueSchedule(schedule);
 
   const html = renderSchedulesSection('Programmation ajoutée.');
-  return htmxRequest ? res.type('html').send(html) : res.redirect('/');
-});
-
-app.post('/schedules/:id/stop', (req, res) => {
-  const schedule = schedules.find((item) => item.id === req.params.id);
-  const htmxRequest = req.get('HX-Request') === 'true';
-
-  if (!schedule) {
-    return res.status(404).send('Programmation introuvable.');
-  }
-
-  stopSchedule(schedule);
-  const html = renderSchedulesSection('Programmation arrêtée.');
   return htmxRequest ? res.type('html').send(html) : res.redirect('/');
 });
 
