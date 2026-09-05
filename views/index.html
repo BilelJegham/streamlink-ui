@@ -1,0 +1,24 @@
+<h1>Planifier un enregistrement Twitch</h1>
+<p>Sans authentification: indiquez l'URL du stream, la qualité et une plage horaire facultative.</p>
+<form method="post" action="/schedules" hx-post="/schedules" hx-target="#schedules-section" hx-swap="outerHTML">
+  <label>
+    URL du stream
+    <input type="url" name="url" placeholder="https://www.twitch.tv/nom_du_stream" required />
+  </label>
+  <label>
+    Qualité
+    <input type="text" name="quality" value="best" required />
+  </label>
+  <fieldset class="grid">
+    <label>
+      Début (optionnel)
+      <input type="datetime-local" name="startAt" />
+    </label>
+    <label>
+      Fin (optionnel)
+      <input type="datetime-local" name="endAt" />
+    </label>
+  </fieldset>
+  <button type="submit">Ajouter la programmation</button>
+</form>
+{{schedulesSection}}
