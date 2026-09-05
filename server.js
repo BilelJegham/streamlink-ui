@@ -173,7 +173,7 @@ function startRecording(schedule) {
   clearScheduleTimers(schedule);
 
   const now = new Date();
-  const fileName = `${schedule.id}-${now.toISOString().replaceAll(':', '-')}.ts`;
+  const fileName = `${schedule.id}-${now.toISOString().replaceAll(':', '-')}.mp4`;
   const outputPath = path.join(recordingsDir, fileName);
 
   setScheduleStatus(schedule, 'recording');
