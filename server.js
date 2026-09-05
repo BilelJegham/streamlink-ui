@@ -9,8 +9,16 @@ const { randomUUID } = require('crypto');
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const recordingsDir = path.join(__dirname, 'recordings');
+const viewsDir = path.join(__dirname, 'views');
 const schedules = [];
 const restartDelayMs = 5000;
+
+const templates = {
+  layout: fs.readFileSync(path.join(viewsDir, 'layout.html'), 'utf8'),
+  index: fs.readFileSync(path.join(viewsDir, 'index.html'), 'utf8'),
+  schedulesSection: fs.readFileSync(path.join(viewsDir, 'schedules-section.html'), 'utf8'),
+  recordings: fs.readFileSync(path.join(viewsDir, 'recordings.html'), 'utf8')
+};
 
 fs.mkdirSync(recordingsDir, { recursive: true });
 
@@ -22,6 +30,10 @@ app.use(
   })
 );
 
+function fillTemplate(template, values) {
+  return template.replace(/\{\{\s*([a-zA-Z0-9]+)\s*\}\}/g, (_, key) => values[key] ?? '');
+}
+
 function formatDate(value) {
   if (!value) return '-';
   const date = value instanceof Date ? value : new Date(value);
@@ -30,28 +42,10 @@ function formatDate(value) {
 }
 
 function renderLayout(title, content) {
-  return `<!doctype html>
-<html lang="fr">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${escapeHtml(title)}</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
-    <script src="https://unpkg.com/htmx.org@2.0.6"></script>
-  </head>
-  <body>
-    <main class="container">
-      <nav>
-        <ul><li><strong>Streamlink UI</strong></li></ul>
-        <ul>
-          <li><a href="/">Programmations</a></li>
-          <li><a href="/recordings">Enregistrements</a></li>
-        </ul>
-      </nav>
-      ${content}
-    </main>
-  </body>
-</html>`;
+  return fillTemplate(templates.layout, {
+    title: escapeHtml(title),
+    content
+  });
 }
 
 function renderSchedulesSection(message, isError) {
@@ -60,40 +54,20 @@ function renderSchedulesSection(message, isError) {
     : '';
 
   const rows = schedules
-    .map((schedule) => {
-      return `<tr>
+    .map((schedule) => `<tr>
         <td><code>${escapeHtml(schedule.id)}</code></td>
         <td>${escapeHtml(schedule.url)}</td>
         <td>${escapeHtml(schedule.quality)}</td>
         <td>${formatDate(schedule.startAt)}</td>
         <td>${formatDate(schedule.endAt)}</td>
         <td>${escapeHtml(schedule.status)}</td>
-      </tr>`;
-    })
-    .join('');
+      </tr>`)
+    .join('') || '<tr><td colspan="6">Aucune programmation pour le moment.</td></tr>';
 
-  return `
-<section id="schedules-section">
-  ${notice}
-  <h2>Programmations d'enregistrement</h2>
-  <figure>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>URL</th>
-          <th>Qualité</th>
-          <th>Début</th>
-          <th>Fin</th>
-          <th>Statut</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows || '<tr><td colspan="6">Aucune programmation pour le moment.</td></tr>'}
-      </tbody>
-    </table>
-  </figure>
-</section>`;
+  return fillTemplate(templates.schedulesSection, {
+    notice,
+    rows
+  });
 }
 
 function startRecording(schedule) {
@@ -103,13 +77,7 @@ function startRecording(schedule) {
 
   schedule.status = 'recording';
 
-  const args = [
-    schedule.url,
-    schedule.quality,
-    '-o',
-    outputPath
-  ];
-
+  const args = [schedule.url, schedule.quality, '-o', outputPath];
   const child = spawn('streamlink', args, { stdio: 'ignore' });
   schedule.process = child;
 
@@ -169,31 +137,9 @@ function parseDateTime(value) {
 }
 
 app.get('/', (req, res) => {
-  const content = `
-<h1>Planifier un enregistrement Twitch</h1>
-<p>Sans authentification: indiquez l'URL du stream, la qualité et une plage horaire facultative.</p>
-<form method="post" action="/schedules" hx-post="/schedules" hx-target="#schedules-section" hx-swap="outerHTML">
-  <label>
-    URL du stream
-    <input type="url" name="url" placeholder="https://www.twitch.tv/nom_du_stream" required />
-  </label>
-  <label>
-    Qualité
-    <input type="text" name="quality" value="best" required />
-  </label>
-  <fieldset class="grid">
-    <label>
-      Début (optionnel)
-      <input type="datetime-local" name="startAt" />
-    </label>
-    <label>
-      Fin (optionnel)
-      <input type="datetime-local" name="endAt" />
-    </label>
-  </fieldset>
-  <button type="submit">Ajouter la programmation</button>
-</form>
-${renderSchedulesSection()}`;
+  const content = fillTemplate(templates.index, {
+    schedulesSection: renderSchedulesSection()
+  });
 
   res.type('html').send(renderLayout('Programmations', content));
 });
@@ -277,24 +223,9 @@ app.get('/recordings', async (req, res, next) => {
         <td>${(file.size / (1024 * 1024)).toFixed(2)} Mo</td>
         <td>${formatDate(file.modifiedAt)}</td>
       </tr>`)
-      .join('');
+      .join('') || '<tr><td colspan="3">Aucun fichier enregistré.</td></tr>';
 
-    const content = `
-<h1>Fichiers d'enregistrements</h1>
-<figure>
-  <table>
-    <thead>
-      <tr>
-        <th>Nom</th>
-        <th>Taille</th>
-        <th>Dernière modification</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${rows || '<tr><td colspan="3">Aucun fichier enregistré.</td></tr>'}
-    </tbody>
-  </table>
-</figure>`;
+    const content = fillTemplate(templates.recordings, { rows });
 
     res.type('html').send(renderLayout('Enregistrements', content));
   } catch (error) {
