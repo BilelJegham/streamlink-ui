@@ -1,0 +1,21 @@
+{
+  "name": "streamlink-ui",
+  "version": "1.0.0",
+  "description": "Application web simple pour planifier des enregistrements Twitch via Streamlink",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "streamlink",
+    "twitch",
+    "htmx",
+    "pico"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
