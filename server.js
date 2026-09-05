@@ -5,14 +5,22 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { randomUUID } = require('crypto');
+const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
 app.set('trust proxy', 1);
+
 const port = Number(process.env.PORT || 3000);
 const recordingsDir = path.join(__dirname, 'recordings');
 const viewsDir = path.join(__dirname, 'views');
-const schedules = [];
+const dataDir = path.join(__dirname, 'data');
+const dbPath = path.join(dataDir, 'app.db');
+
 const restartDelayMs = 5000;
+const schedulerTickMs = 10000;
+
+fs.mkdirSync(recordingsDir, { recursive: true });
+fs.mkdirSync(dataDir, { recursive: true });
 
 const templates = {
   layout: fs.readFileSync(path.join(viewsDir, 'layout.html'), 'utf8'),
@@ -21,7 +29,53 @@ const templates = {
   recordings: fs.readFileSync(path.join(viewsDir, 'recordings.html'), 'utf8')
 };
 
-fs.mkdirSync(recordingsDir, { recursive: true });
+const db = new DatabaseSync(dbPath);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    quality TEXT NOT NULL,
+    start_at TEXT,
+    end_at TEXT,
+    continuous INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+
+const insertScheduleStmt = db.prepare(`
+  INSERT INTO schedules (id, url, quality, start_at, end_at, continuous, status, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const updateStatusStmt = db.prepare(`
+  UPDATE schedules
+  SET status = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+const selectSchedulesStmt = db.prepare(`
+  SELECT id, url, quality, start_at, end_at, continuous, status, created_at, updated_at
+  FROM schedules
+  ORDER BY created_at DESC
+`);
+
+const schedules = selectSchedulesStmt.all().map((row) => ({
+  id: row.id,
+  url: row.url,
+  quality: row.quality,
+  startAt: parseDateTime(row.start_at),
+  endAt: parseDateTime(row.end_at),
+  continuous: Boolean(row.continuous),
+  status: row.status,
+  createdAt: parseDateTime(row.created_at),
+  updatedAt: parseDateTime(row.updated_at),
+  startTimer: null,
+  stopTimer: null,
+  restartTimer: null,
+  process: null
+}));
 
 app.use(express.urlencoded({ extended: false }));
 app.use(
@@ -71,54 +125,115 @@ function renderSchedulesSection(message, isError) {
   });
 }
 
+function setScheduleStatus(schedule, status) {
+  schedule.status = status;
+  schedule.updatedAt = new Date();
+  updateStatusStmt.run(status, schedule.updatedAt.toISOString(), schedule.id);
+}
+
+function shouldRetry(schedule) {
+  if (schedule.continuous && !schedule.endAt) {
+    return true;
+  }
+
+  if (schedule.endAt && schedule.endAt.getTime() > Date.now()) {
+    return true;
+  }
+
+  return false;
+}
+
+function clearScheduleTimers(schedule) {
+  if (schedule.startTimer) {
+    clearTimeout(schedule.startTimer);
+    schedule.startTimer = null;
+  }
+
+  if (schedule.stopTimer) {
+    clearTimeout(schedule.stopTimer);
+    schedule.stopTimer = null;
+  }
+
+  if (schedule.restartTimer) {
+    clearTimeout(schedule.restartTimer);
+    schedule.restartTimer = null;
+  }
+}
+
 function startRecording(schedule) {
+  if (schedule.process) {
+    return;
+  }
+
+  if (schedule.endAt && schedule.endAt.getTime() <= Date.now()) {
+    setScheduleStatus(schedule, 'completed');
+    return;
+  }
+
+  clearScheduleTimers(schedule);
+
   const now = new Date();
   const fileName = `${schedule.id}-${now.toISOString().replaceAll(':', '-')}.ts`;
   const outputPath = path.join(recordingsDir, fileName);
 
-  schedule.status = 'recording';
-  console.log(`[recording] Déclenchement de l'enregistrement ${schedule.id} pour ${schedule.url}`);
+  setScheduleStatus(schedule, 'recording');
+  console.log(`[recording] Démarrage ${schedule.id} (${schedule.url})`);
 
   const args = [schedule.url, schedule.quality, '-o', outputPath];
-  console.log(`[recording] Lancement de Streamlink pour ${schedule.id}, sortie: ${fileName}`);
-  const child = spawn('streamlink', args, { stdio: 'ignore' });
+  const child = spawn('streamlink', args, { stdio: ['ignore', 'ignore', 'pipe'] });
   schedule.process = child;
 
-  child.on('error', (error) => {
-    console.error(`[recording] Échec du lancement de ${schedule.id}: ${error.message}`);
-    schedule.status = 'failed';
-    schedule.process = null;
+  child.stderr.on('data', (chunk) => {
+    const message = String(chunk).trim();
+    if (message) {
+      console.error(`[recording:${schedule.id}] ${message}`);
+    }
   });
 
-  child.on('close', (code) => {
+  child.on('error', (error) => {
+    console.error(`[recording] Erreur lancement ${schedule.id}: ${error.message}`);
     schedule.process = null;
-    console.log(`[recording] Streamlink terminé pour ${schedule.id} avec le code ${code}`);
-    if (schedule.status === 'stopped') {
-      schedule.status = 'completed';
-      console.log(`[recording] Enregistrement ${schedule.id} terminé après un arrêt demandé`);
-      return;
-    }
 
-    if (schedule.continuous && !schedule.endAt) {
-      schedule.status = 'waiting-next-live';
-      console.log(`[recording] ${schedule.id} attend le prochain live, redémarrage dans ${restartDelayMs} ms`);
+    if (shouldRetry(schedule)) {
+      setScheduleStatus(schedule, 'waiting-next-live');
       schedule.restartTimer = setTimeout(() => {
+        schedule.restartTimer = null;
         startRecording(schedule);
       }, restartDelayMs);
       return;
     }
 
-    schedule.status = code === 0 ? 'completed' : 'failed';
-    console.log(`[recording] Statut final de ${schedule.id}: ${schedule.status}`);
+    setScheduleStatus(schedule, 'failed');
+  });
+
+  child.on('close', (code) => {
+    schedule.process = null;
+    console.log(`[recording] Fin ${schedule.id} code=${code}`);
+
+    if (schedule.status === 'stopped') {
+      setScheduleStatus(schedule, 'completed');
+      return;
+    }
+
+    if (shouldRetry(schedule)) {
+      setScheduleStatus(schedule, 'waiting-next-live');
+      schedule.restartTimer = setTimeout(() => {
+        schedule.restartTimer = null;
+        startRecording(schedule);
+      }, restartDelayMs);
+      return;
+    }
+
+    setScheduleStatus(schedule, code === 0 ? 'completed' : 'failed');
   });
 
   if (schedule.endAt) {
     const delay = schedule.endAt.getTime() - Date.now();
     if (delay > 0) {
       schedule.stopTimer = setTimeout(() => {
+        schedule.stopTimer = null;
         if (schedule.process) {
-          schedule.status = 'stopped';
-          console.log(`[recording] Arrêt demandé pour ${schedule.id} à la date de fin prévue`);
+          setScheduleStatus(schedule, 'stopped');
           schedule.process.kill('SIGTERM');
         }
       }, delay);
@@ -127,18 +242,52 @@ function startRecording(schedule) {
 }
 
 function queueSchedule(schedule) {
+  if (schedule.process) {
+    return;
+  }
+
+  if (schedule.endAt && schedule.endAt.getTime() <= Date.now()) {
+    setScheduleStatus(schedule, 'completed');
+    return;
+  }
+
   if (!schedule.startAt || schedule.startAt.getTime() <= Date.now()) {
-    console.log(`[recording] Démarrage immédiat demandé pour ${schedule.id}`);
     startRecording(schedule);
     return;
   }
 
-  schedule.status = 'scheduled';
-  console.log(`[recording] Enregistrement ${schedule.id} planifié pour ${formatDate(schedule.startAt)}`);
-  schedule.startTimer = setTimeout(() => {
-    console.log(`[recording] Heure de déclenchement atteinte pour ${schedule.id}`);
-    startRecording(schedule);
-  }, schedule.startAt.getTime() - Date.now());
+  if (!schedule.startTimer) {
+    setScheduleStatus(schedule, 'scheduled');
+    schedule.startTimer = setTimeout(() => {
+      schedule.startTimer = null;
+      startRecording(schedule);
+    }, schedule.startAt.getTime() - Date.now());
+  }
+}
+
+function schedulerTick() {
+  for (const schedule of schedules) {
+    if (schedule.process || schedule.startTimer || schedule.restartTimer) {
+      continue;
+    }
+
+    if (schedule.endAt && schedule.endAt.getTime() <= Date.now()) {
+      if (schedule.status !== 'completed') {
+        setScheduleStatus(schedule, 'completed');
+      }
+      continue;
+    }
+
+    if (schedule.status === 'completed') {
+      continue;
+    }
+
+    if (schedule.status === 'scheduled' && schedule.startAt && schedule.startAt.getTime() > Date.now()) {
+      continue;
+    }
+
+    queueSchedule(schedule);
+  }
 }
 
 function parseDateTime(value) {
@@ -189,6 +338,7 @@ app.post('/schedules', (req, res) => {
     return htmxRequest ? res.status(422).type('html').send(html) : res.status(422).send('La date de fin doit être après la date de début.');
   }
 
+  const now = new Date();
   const schedule = {
     id: randomUUID(),
     url,
@@ -197,11 +347,25 @@ app.post('/schedules', (req, res) => {
     endAt,
     continuous: !startAt && !endAt,
     status: 'pending',
+    createdAt: now,
+    updatedAt: now,
     startTimer: null,
     stopTimer: null,
     restartTimer: null,
     process: null
   };
+
+  insertScheduleStmt.run(
+    schedule.id,
+    schedule.url,
+    schedule.quality,
+    schedule.startAt ? schedule.startAt.toISOString() : null,
+    schedule.endAt ? schedule.endAt.toISOString() : null,
+    schedule.continuous ? 1 : 0,
+    schedule.status,
+    schedule.createdAt.toISOString(),
+    schedule.updatedAt.toISOString()
+  );
 
   schedules.unshift(schedule);
   queueSchedule(schedule);
@@ -244,6 +408,12 @@ app.get('/recordings', async (req, res, next) => {
     next(error);
   }
 });
+
+for (const schedule of schedules) {
+  queueSchedule(schedule);
+}
+
+setInterval(schedulerTick, schedulerTickMs);
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
